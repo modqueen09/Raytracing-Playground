@@ -3,6 +3,10 @@
 
 #include "hittable.h"
 #include "material.h"
+#include <thread>
+#include <vector>
+#include <mutex>
+#include <atomic>
 
 class camera {
     public:
@@ -25,15 +29,64 @@ class camera {
 
                 std::cout << "P3\n" << image_width << ' ' << image_height << "\n255\n";
 
-                for (int j = 0; j < image_height; j++) {
-                    std::clog << "\rScanlines remaining: " << (image_height - j) << ' ' << std::flush;
-                    for (int i = 0; i < image_width; i++) {
-                        colour pixel_color(0,0,0);
-                        for (int sample = 0; sample < samples_per_pixel; sample++) {
-                            ray r = get_ray(i, j);
-                            pixel_color += ray_colour(r, max_depth, world);
+                // Create color buffer for entire image
+                std::vector<colour> framebuffer(image_width * image_height);
+                
+                // Determine number of threads
+                unsigned int num_threads = std::thread::hardware_concurrency();
+                if (num_threads == 0) num_threads = 4; // Fallback
+                
+                std::clog << "Rendering with " << num_threads << " threads...\n";
+                
+                std::vector<std::thread> threads;
+                std::atomic<int> scanlines_completed(0);
+                
+                // Lambda function for rendering scanlines
+                auto render_scanlines = [&](int start_j, int end_j) {
+                    for (int j = start_j; j < end_j; j++) {
+                        for (int i = 0; i < image_width; i++) {
+                            colour pixel_color(0,0,0);
+                            for (int sample = 0; sample < samples_per_pixel; sample++) {
+                                ray r = get_ray(i, j);
+                                pixel_color += ray_colour(r, max_depth, world);
+                            }
+                            framebuffer[j * image_width + i] = pixel_samples_scale * pixel_color;
                         }
-                        write_colour(std::cout, pixel_samples_scale * pixel_color);                    }
+                        
+                        // Update progress
+                        int completed = ++scanlines_completed;
+                        if (completed % 10 == 0 || completed == image_height) {
+                            std::clog << "\rScanlines remaining: " << (image_height - completed) << ' ' << std::flush;
+                        }
+                    }
+                };
+                
+                // Distribute scanlines across threads
+                int scanlines_per_thread = image_height / num_threads;
+                int remaining_scanlines = image_height % num_threads;
+                
+                int current_scanline = 0;
+                for (unsigned int t = 0; t < num_threads; t++) {
+                    int start = current_scanline;
+                    int count = scanlines_per_thread + (t < remaining_scanlines ? 1 : 0);
+                    int end = start + count;
+                    
+                    threads.emplace_back(render_scanlines, start, end);
+                    current_scanline = end;
+                }
+                
+                // Wait for all threads to complete
+                for (auto& thread : threads) {
+                    thread.join();
+                }
+                
+                std::clog << "\rRendering complete. Writing output...\n";
+                
+                // Output framebuffer
+                for (int j = 0; j < image_height; j++) {
+                    for (int i = 0; i < image_width; i++) {
+                        write_colour(std::cout, framebuffer[j * image_width + i]);
+                    }
                 }
 
         std::clog << "\rDone.                 \n";
